@@ -228,7 +228,7 @@ commit the release note with the change.
 1. Generate the release notes and use [`pandoc`](https://pandoc.org/) to format
 them for Github:
 
-    riot run -s reno report --no-show-source | pandoc -f rst -t gfm --wrap=none
+       riot run -s reno report --no-show-source | pandoc -f rst -t gfm --wrap=none
 
     Copy the output and put them in a new release: https://github.com/DataDog/dd-apm-test-agent/releases/new.
 
