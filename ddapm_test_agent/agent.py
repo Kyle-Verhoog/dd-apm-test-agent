@@ -95,6 +95,199 @@ def _session_token(request: Request) -> Optional[str]:
         token = None
     return token
 
+# import enum
+# class EventTagEnum(str, enum.Enum):
+#     source_type: str
+#     subject_type: str
+#     action: str
+#
+#     # Name = "source_type:subject_type:action"
+#     def __new__(cls, value: str):
+#         values = value.split(":")
+#         obj = str.__new__(cls, value)
+#         obj._value_ = value
+#         obj.source_type = values[0]
+#         obj.subject_type = ":".join(values[1:-1]) or value[0]
+#         obj.action = values[-1]
+#         return obj
+#
+# projects = []
+# class EventTag:
+#     class Project(EventTagEnum):
+#         # Name = "source_type:subject_type:action"
+#         ShortLivedAPITokenAdded = "account:short_lived_api_token:added"
+#         APITokenAdded = "project:api_token:added"
+#         APITokenRemoved = "project:api_token:removed"
+#         OIDCProviderAdded = "project:oidc:provider-added"
+#         OIDCProviderRemoved = "project:oidc:provider-removed"
+#         OrganizationProjectAdd = "project:organization_project:add"
+#         OrganizationProjectRemove = "project:organization_project:remove"
+#         OwnersRequire2FADisabled = "project:owners_require_2fa:disabled"
+#         OwnersRequire2FAEnabled = "project:owners_require_2fa:enabled"
+#         ProjectCreate = "project:create"
+#         ReleaseAdd = "project:release:add"
+#         ReleaseFileRemove = "project:release:file:remove"
+#         ReleaseRemove = "project:release:remove"
+#         ReleaseUnyank = "project:release:unyank"
+#         ReleaseYank = "project:release:yank"
+#         RoleAdd = "project:role:add"
+#         RoleChange = "project:role:change"
+#         RoleDeclineInvite = "project:role:decline_invite"
+#         RoleInvite = "project:role:invite"
+#         RoleRemove = "project:role:remove"
+#         RoleRevokeInvite = "project:role:revoke_invite"
+#         TeamProjectRoleAdd = "project:team_project_role:add"
+#         TeamProjectRoleChange = "project:team_project_role:change"
+#         TeamProjectRoleRemove = "project:team_project_role:remove"
+
+
+import sqlalchemy
+from sqlalchemy.ext.declarative import declarative_base  # type: ignore
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.ext.declarative import declared_attr
+metadata = sqlalchemy.MetaData()
+
+class ModelBase:
+    def __repr__(self):
+        inst = inspect(self)
+        self.__repr__ = make_repr(
+            *[c_attr.key for c_attr in inst.mapper.column_attrs], _self=self
+        )
+        return self.__repr__()
+ModelBase = declarative_base(cls=ModelBase, metadata=metadata)  # type: ignore
+
+class Model(ModelBase):
+
+    __abstract__ = True
+
+    id = sqlalchemy.Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=sqlalchemy.text("gen_random_uuid()"),
+    )
+
+from sqlalchemy.ext.declarative import AbstractConcreteBase, declared_attr
+from sqlalchemy.ext.hybrid import hybrid_property
+class Event(AbstractConcreteBase):
+    tag = sqlalchemy.Column(sqlalchemy.String, nullable=False)
+
+    @declared_attr
+    def ip_address_id(cls):  # noqa: N805
+        return sqlalchemy.Column(
+            UUID(as_uuid=True),
+            sqlalchemy.ForeignKey("ip_addresses.id", onupdate="CASCADE", ondelete="CASCADE"),
+            nullable=True,
+        )
+
+    @declared_attr
+    def __tablename__(cls):  # noqa: N805
+        return "_".join([cls.__name__.removesuffix("Event").lower(), "events"])
+
+    @declared_attr
+    def __table_args__(cls):  # noqa: N805
+        return (sqlalchemy.Index(f"ix_{ cls.__tablename__ }_source_id", "source_id"),)
+
+    @declared_attr
+    def __mapper_args__(cls):  # noqa: N805
+        return (
+            {"polymorphic_identity": cls.__name__, "concrete": True}
+            if cls.__name__ != "Event"
+            else {}
+        )
+
+    @declared_attr
+    def source_id(cls):  # noqa: N805
+        return sqlalchemy.Column(
+            UUID(as_uuid=True),
+            sqlalchemy.ForeignKey(
+                "%s.id" % cls._parent_class.__tablename__,
+                deferrable=True,
+                initially="DEFERRED",
+            ),
+            nullable=False,
+        )
+
+    @declared_attr
+    def source(cls):  # noqa: N805
+        return sqlalchemy.orm.relationship(cls._parent_class, back_populates="events")
+
+    @hybrid_property
+    def ip_address(cls):  # noqa: N805
+        if cls.ip_address_obj is not None:
+            return cls.ip_address_obj
+        return cls.ip_address_string
+
+    def __init_subclass__(cls, /, parent_class, **kwargs):
+        cls._parent_class = parent_class
+        return cls
+
+
+
+
+class HasEvents:
+    def __init_subclass__(cls, /, **kwargs):
+        super().__init_subclass__(**kwargs)
+        cls.Event = type(
+            f"{cls.__name__}Event", (Event, Model), dict(), parent_class=cls
+        )
+        return cls
+
+    @declared_attr
+    def events(cls):  # noqa: N805
+        return sqlalchemy.orm.relationship(
+            cls.Event,
+            cascade="all, delete-orphan",
+            lazy="dynamic",
+            back_populates="source",
+        )
+
+    def record_event(self, *, tag, ip_address, additional=None):
+        session = orm.object_session(self)
+        event = self.Event(
+            source=self,
+            tag=tag,
+            ip_address=ip_address,
+            additional=additional,
+        )
+        session.add(event)
+        session.flush()
+
+        return event
+
+
+def make_repr(*attrs, _self=None):
+    def _repr(self=None):
+        if self is None and _self is not None:
+            self = _self
+
+        try:
+            return "{}({})".format(
+                self.__class__.__name__,
+                ", ".join(f"{a}={repr(getattr(self, a))}" for a in attrs),
+            )
+        except DetachedInstanceError:
+            return f"{self.__class__.__name__}(<detached>)"
+
+    return _repr
+
+class Project(HasEvents, Model):
+
+    __tablename__ = "projects"
+    __table_args__ = (
+        sqlalchemy.CheckConstraint(
+            "name ~* '^([A-Z0-9]|[A-Z0-9][A-Z0-9._-]*[A-Z0-9])$'::text",
+            name="projects_valid_name",
+        ),
+        sqlalchemy.CheckConstraint(
+            "upload_limit <= 1073741824",  # 1.0 GiB == 1073741824 bytes
+            name="projects_upload_limit_max_value",
+        ),
+    )
+
+    __repr__ = make_repr("name")
+
+    name = sqlalchemy.Column(sqlalchemy.Text, nullable=False)
+
 
 @middleware  # type: ignore
 async def session_token_middleware(request: Request, handler: _Handler) -> web.Response:
@@ -277,6 +470,10 @@ class Agent:
         return web.HTTPOk()
 
     async def handle_info(self, request: Request) -> web.Response:
+        for i in range(1000):
+            projects.append(Project(
+                name="asdf"
+            ))
         return web.json_response(
             {
                 "version": "test",
